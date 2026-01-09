@@ -8,138 +8,176 @@ router.get('/', async (req, res) => {
   try {
     console.log('Dashboard API called');
 
-    // 1. Fetch transactions with items (safe, no relation error)
+    // 1. Fetch all completed transactions
     const { data: transactions, error: txError } = await supabase
       .from('transactions')
-      .select('id, total_amount, created_at')
-      .eq('status', 'completed');
+      .select('id, total_amount, created_at, items')
+      .eq('status', 'completed')
+      .order('created_at', { ascending: true });
 
     if (txError) {
-      console.error('Transactions error:', txError);
-      // Don't crash — continue with 0 revenue
+      console.error('Transactions fetch error:', txError.message);
+      throw txError;
     }
 
     const txList = transactions || [];
-    const totalRevenue = txList.reduce((sum, tx) => sum + Number(tx.total_amount || 0), 0);
 
-    // 2. Total parts (no is_active filter — just count all)
-    const { count: totalParts = 0, error: partsError } = await supabase
+    // 2. Total retail revenue (what customers actually paid)
+    const totalRetailRevenue = txList.reduce((sum, tx) => 
+      sum + Number(tx.total_amount || 0), 0);
+
+    // 3. Total products count
+    const { count: totalParts = 0 } = await supabase
       .from('products')
       .select('id', { count: 'exact', head: true });
 
-    if (partsError) console.error('Products count error:', partsError);
-
-    // 3. Low stock count (default threshold 10)
-    const { data: products = [], error: prodError } = await supabase
+    // 4. Low stock items
+    const LOW_STOCK_THRESHOLD = 10;
+    const { data: lowStockProducts } = await supabase
       .from('products')
-      .select('stock_quantity');
+      .select('name, stock_quantity')
+      .lte('stock_quantity', LOW_STOCK_THRESHOLD)
+      .order('stock_quantity', { ascending: true });
 
-    if (prodError) console.error('Products fetch error:', prodError);
+    const lowStockItems = (lowStockProducts || []).map(p => ({
+      name: p.name || 'Unnamed Product',
+      stock: Number(p.stock_quantity || 0)
+    }));
 
-    const lowStockCount = products.filter(p => (p.stock_quantity || 0) <= 10).length;
+    // ── 5. Calculate capital cost & total profit ─────────────────────────────
+    let totalCapitalCost = 0;
 
-    // 4. Top sold parts — now from transaction_items properly
-    let txItems = [];
-    let itemsError = null;
-
-    if (txList.length > 0) {
-      const transactionIds = txList.map(t => t.id);
-      const { data, error } = await supabase
-        .from('transaction_items')
-        .select('name, price_at_sale, quantity')
-        .in('transaction_id', transactionIds);
-
-      txItems = data || [];
-      itemsError = error;
-
-      if (error) {
-        console.error('Transaction items error:', error.message);
-        // Continue with empty items
+    // Collect all unique SKUs from transactions
+    const allSkus = new Set();
+    txList.forEach(tx => {
+      if (Array.isArray(tx.items)) {
+        tx.items.forEach(item => {
+          if (item?.sku) allSkus.add(item.sku.trim());
+        });
       }
-    } else {
-      console.log('No completed transactions yet — skipping transaction_items query');
-    }
-
-    const soldMap = {};
-    txItems.forEach(item => {
-      const name = item.name || 'Unknown Item';
-      const qty = Number(item.quantity || 0);
-      const revenue = qty * Number(item.price_at_sale || 0);
-
-      if (!soldMap[name]) soldMap[name] = { name, quantity: 0, revenue: 0 };
-      soldMap[name].quantity += qty;
-      soldMap[name].revenue += revenue;
     });
 
-    const topSoldParts = Object.values(soldMap)
-      .sort((a, b) => b.quantity - a.quantity)
-      .slice(0, 5)
-      .map(p => ({ ...p, revenue: Number(p.revenue.toFixed(2)) }));
+    // Bulk fetch products with capital prices
+    const { data: products } = await supabase
+      .from('products')
+      .select('sku, capital_price')
+      .in('sku', Array.from(allSkus));
 
-    const mostSoldPart = topSoldParts[0] || { name: 'No sales yet', quantity: 0 };
+    const productMap = new Map(products.map(p => [p.sku, Number(p.capital_price || 0)]));
 
-    // 5. Monthly revenue (last 6 months)
+    // Calculate capital cost per transaction
+    txList.forEach(tx => {
+      if (!Array.isArray(tx.items)) return;
+
+      let txCapitalCost = 0;
+
+      tx.items.forEach(item => {
+        const sku = item?.sku?.trim();
+        if (!sku) return;
+
+        const capitalPrice = productMap.get(sku) || 0;
+        const quantity = Number(item.quantity || 1); // Default to 1 if missing
+
+        txCapitalCost += capitalPrice * quantity;
+      });
+
+      totalCapitalCost += txCapitalCost;
+    });
+
+    const totalGrossProfit = totalRetailRevenue - totalCapitalCost;
+
+    // ── 6. Daily gross profit for CURRENT MONTH only ─────────────────────────
     const now = new Date();
-    const labels = [];
-    const monthlyData = [];
+    const currentYear = now.getFullYear();
+    const currentMonth = now.getMonth(); // 0-11
+    const daysInCurrentMonth = new Date(currentYear, currentMonth + 1, 0).getDate();
 
-    for (let i = 5; i >= 0; i--) {
-      const date = new Date(now.getFullYear(), now.getMonth() - i, 1);
-      const label = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-      labels.push(label);
-      monthlyData.push(0);
-    }
+    // Initialize array: index 0 = day 1, index 1 = day 2, ..., up to today
+    const dailyProfits = new Array(daysInCurrentMonth).fill(0);
 
     txList.forEach(tx => {
-      if (tx.created_at) {
-        const date = new Date(tx.created_at);
-        const label = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
-        const index = labels.indexOf(label);
-        if (index !== -1) monthlyData[index] += Number(tx.total_amount || 0);
+      const txDate = new Date(tx.created_at);
+      if (
+        txDate.getFullYear() === currentYear &&
+        txDate.getMonth() === currentMonth
+      ) {
+        const dayOfMonth = txDate.getDate() - 1; // 0-based index
+
+        // Retail revenue for this transaction
+        const retail = Number(tx.total_amount || 0);
+
+        // Capital cost for this transaction
+        let txCapital = 0;
+        if (Array.isArray(tx.items)) {
+          tx.items.forEach(item => {
+            const sku = item?.sku?.trim();
+            if (!sku) return;
+            const capitalPrice = productMap.get(sku) || 0;
+            const qty = Number(item.quantity || 1);
+            txCapital += capitalPrice * qty;
+          });
+        }
+
+        const dailyProfit = retail - txCapital;
+
+        // Add to the correct day
+        dailyProfits[dayOfMonth] += dailyProfit;
       }
     });
 
-    // Reverse to oldest → newest
-    labels.reverse();
-    monthlyData.reverse();
+    // ── 7. Top 5 sold products (by quantity) ────────────────────────────────
+    const skuCountMap = {};
+    txList.forEach(tx => {
+      if (!Array.isArray(tx.items)) return;
+      tx.items.forEach(item => {
+        const sku = item?.sku?.trim();
+        if (sku) {
+          skuCountMap[sku] = (skuCountMap[sku] || 0) + (Number(item.quantity) || 1);
+        }
+      });
+    });
 
-    // Send response — always success with real data
+    const topSoldSkus = Object.entries(skuCountMap)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5)
+      .map(([sku]) => sku);
+
+    const { data: topProducts } = await supabase
+      .from('products')
+      .select('sku, name')
+      .in('sku', topSoldSkus);
+
+    const topSoldParts = topSoldSkus.map(sku => {
+      const product = topProducts?.find(p => p.sku === sku);
+      const quantity = skuCountMap[sku] || 0;
+      return {
+        name: product?.name || `Unknown (${sku})`,
+        quantity,
+      };
+    });
+
+    const fallbackPart = { name: 'No sales yet', quantity: 0 };
+
+    // Final response
     res.json({
       success: true,
       data: {
-        totalRevenue: Number(totalRevenue.toFixed(2)),
-        totalTransactions: txList.length,
-        totalParts: totalParts || products.length || 0,
-        lowStockCount,
-        mostSoldPart: {
-          name: mostSoldPart.name,
-          units: mostSoldPart.quantity || 0
-        },
-        topSoldParts: topSoldParts.length ? topSoldParts : [{ name: 'No sales yet', quantity: 0, revenue: 0 }],
-        monthlyIncome: {
-          labels,
-          data: monthlyData.map(v => Number(v.toFixed(2)))
-        }
+        totalCapitalRevenue: Number(totalCapitalCost.toFixed(2)),
+        totalRetailRevenue: Number(totalRetailRevenue.toFixed(2)),
+        totalGrossProfit: Number(totalGrossProfit.toFixed(2)),
+        totalParts: totalParts || 0,
+        lowStockCount: lowStockItems.length,
+        lowStockItems: lowStockItems.length > 0 ? lowStockItems : [],
+        topSoldParts: topSoldParts.length > 0 ? topSoldParts : [fallbackPart],
+        currentMonthDailyProfits: dailyProfits.map(v => Number(v.toFixed(2)))
       }
     });
 
   } catch (err) {
-    console.error('Dashboard critical error:', err);
-    // Fallback: send default data so dashboard NEVER hangs
-    res.json({
-      success: true,
-      data: {
-        totalRevenue: 0,
-        totalTransactions: 0,
-        totalParts: 0,
-        lowStockCount: 0,
-        mostSoldPart: { name: 'No data', units: 0 },
-        topSoldParts: [],
-        monthlyIncome: {
-          labels: ['Aug 2025', 'Sep 2025', 'Oct 2025', 'Nov 2025', 'Dec 2025', 'Jan 2026'],
-          data: [0, 0, 0, 0, 0, 0]
-        }
-      }
+    console.error('Dashboard API error:', err);
+    res.status(500).json({
+      success: false,
+      error: err.message || 'Internal server error'
     });
   }
 });

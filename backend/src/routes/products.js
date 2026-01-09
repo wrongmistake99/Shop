@@ -35,7 +35,7 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PATCH /api/products?id=eq.{uuid}
+// PATCH /api/products?id={uuid}
 router.patch('/', async (req, res) => {
   try {
     let productId = req.query.id;
@@ -68,7 +68,7 @@ router.patch('/', async (req, res) => {
   }
 });
 
-// DELETE /api/products?id=eq.{uuid}
+// DELETE /api/products?id={uuid}
 router.delete('/', async (req, res) => {
   try {
     let productId = req.query.id;

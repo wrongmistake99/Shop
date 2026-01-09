@@ -6,10 +6,11 @@ import morgan from 'morgan';
 
 import { supabase } from './config/supabase.js';
 
-// Import routers
+// Import all routers using ESM syntax (no require!)
 import productsRouter from './routes/products.js';
 import transactionsRouter from './routes/transactions.js';
-import dashboardRouter from './routes/dashboard.js';  // ← NEW: Dashboard route
+import dashboardRouter from './routes/dashboard.js';
+import recordsRouter from './routes/records.js';          // ← Fixed here
 
 export function createApp() {
   const app = express();
@@ -18,7 +19,7 @@ export function createApp() {
   app.use(helmet());
   app.use(morgan('dev'));
 
-  // CORS configuration
+  // CORS configuration (allow frontend origin)
   app.use(cors({
     origin: process.env.FRONTEND_URL || 'http://localhost:3000',
     credentials: true,
@@ -26,7 +27,7 @@ export function createApp() {
     allowedHeaders: ['Content-Type', 'Authorization']
   }));
 
-  // Body parsing
+  // Body parsing (increased limit for larger payloads)
   app.use(express.json({ limit: '10mb' }));
   app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
@@ -41,6 +42,7 @@ export function createApp() {
         products: "/api/products - List all products",
         transactions: "/api/transactions - List all transactions",
         dashboard: "/api/dashboard - Real-time business stats",
+        records: "/api/records?type=inventory|transactions - View history",
         createTransaction: "POST /api/transactions - Create new transaction"
       },
       timestamp: new Date().toISOString()
@@ -83,10 +85,11 @@ export function createApp() {
     }
   });
 
-  // Mount routers
+  // Mount all routers
   app.use('/api/products', productsRouter);
   app.use('/api/transactions', transactionsRouter);
-  app.use('/api/dashboard', dashboardRouter);  // ← NEW: Dashboard endpoint
+  app.use('/api/dashboard', dashboardRouter);
+  app.use('/api/records', recordsRouter);                // ← Fixed here
 
   // 404 handler - must be after all other routes
   app.use((req, res) => {

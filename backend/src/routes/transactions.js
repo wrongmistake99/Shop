@@ -1,10 +1,9 @@
-// src/routes/transactions.js
 import { Router } from 'express';
 import { supabase } from '../config/supabase.js';
 
 const router = Router();
 
-// GET /api/transactions - Fetch transactions with embedded items
+// GET /api/transactions - Fetch all transactions
 router.get('/', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -15,7 +14,8 @@ router.get('/', async (req, res) => {
     if (error) throw error;
 
     const formatted = data.map(tx => ({
-      id: tx.transaction_number || tx.id,
+      id: tx.id,
+      transaction_number: tx.transaction_number,
       date: new Date(tx.created_at).toLocaleDateString('en-PH', {
         year: 'numeric',
         month: 'short',
@@ -29,20 +29,17 @@ router.get('/', async (req, res) => {
         : 'Cash',
       total: Number(tx.total_amount).toFixed(2),
       status: tx.status ? tx.status.charAt(0).toUpperCase() + tx.status.slice(1) : 'Completed',
-      items: tx.items || []  // From JSONB column
+      items: tx.items || []  // array of { sku, name, retail_price, quantity }
     }));
 
     res.json({ success: true, data: formatted });
   } catch (err) {
     console.error('GET /api/transactions error:', err.message);
-    res.status(500).json({
-      success: false,
-      error: err.message || 'Failed to fetch transactions'
-    });
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
-// POST /api/transactions - Create transaction + safe stock deduction
+// POST /api/transactions - Create new transaction
 router.post('/', async (req, res) => {
   let {
     customer_name = 'Walk-in Customer',
@@ -53,19 +50,12 @@ router.post('/', async (req, res) => {
     items = []
   } = req.body;
 
-  // Validation
   if (!total_amount || isNaN(total_amount) || Number(total_amount) <= 0) {
-    return res.status(400).json({
-      success: false,
-      error: 'total_amount is required and must be a positive number'
-    });
+    return res.status(400).json({ success: false, error: 'Invalid total_amount' });
   }
 
   if (!Array.isArray(items) || items.length === 0) {
-    return res.status(400).json({
-      success: false,
-      error: 'At least one item must be included'
-    });
+    return res.status(400).json({ success: false, error: 'At least one item required' });
   }
 
   total_amount = Number(total_amount);
@@ -76,7 +66,7 @@ router.post('/', async (req, res) => {
     const random = String(Math.floor(1000 + Math.random() * 9000));
     const transaction_number = `TXN-${dateStr}-${random}`;
 
-    // Insert transaction with items as JSONB
+    // Insert transaction
     const { data: transaction, error: txError } = await supabase
       .from('transactions')
       .insert({
@@ -85,49 +75,91 @@ router.post('/', async (req, res) => {
         customer_phone: customer_phone?.trim() || null,
         payment_method,
         total_amount,
-        items,  // Full items array saved here
+        items, // [{ sku, name, retail_price, quantity }]
         status: 'completed',
         notes: notes?.trim() || null
       })
       .select()
       .single();
 
-    if (txError) {
-      console.error('Transaction insert error:', txError);
-      throw txError;
-    }
+    if (txError) throw txError;
 
-    // Deduct stock using safe PostgreSQL function
+    // Deduct stock (safe decrement)
     for (const item of items) {
       const qty = Number(item.quantity);
       if (qty > 0) {
-        const { error: rpcError } = await supabase
-          .rpc('safe_decrement_stock', {
-            p_sku: item.sku,
-            p_quantity: qty
-          });
-
-        if (rpcError) {
-          console.warn(`Failed to deduct stock for SKU ${item.sku}:`, rpcError.message);
-          // Don't fail transaction — just warn
-        }
+        await supabase.rpc('safe_decrement_stock', {
+          p_sku: item.sku,
+          p_quantity: qty
+        });
       }
     }
 
     res.status(201).json({
       success: true,
       data: {
-        ...transaction,
-        items: transaction.items || []
+        id: transaction.id,
+        transaction_number: transaction.transaction_number,
+        date: new Date(transaction.created_at).toLocaleDateString('en-PH', { 
+          year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' 
+        }),
+        customer: transaction.customer_name || 'Walk-in Customer',
+        payment: transaction.payment_method,
+        total: Number(transaction.total_amount).toFixed(2),
+        status: 'Completed',
+        items: transaction.items
       }
     });
 
   } catch (err) {
-    console.error('POST /api/transactions error:', err);
-    res.status(400).json({
-      success: false,
-      error: err.message || 'Failed to create transaction'
-    });
+    console.error('POST transaction error:', err);
+    res.status(400).json({ success: false, error: err.message });
+  }
+});
+
+// PATCH /api/transactions/:id - Refund / Delete transaction (soft delete + restore stock)
+router.patch('/:id', async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    // Get transaction first
+    const { data: tx, error: fetchError } = await supabase
+      .from('transactions')
+      .select('items, status')
+      .eq('id', id)
+      .single();
+
+    if (fetchError || !tx) {
+      return res.status(404).json({ success: false, error: 'Transaction not found' });
+    }
+
+    if (tx.status === 'refunded') {
+      return res.status(400).json({ success: false, error: 'Transaction already refunded' });
+    }
+
+    // Restore stock
+    for (const item of tx.items || []) {
+      const qty = Number(item.quantity);
+      if (qty > 0) {
+        await supabase.rpc('safe_increment_stock', {
+          p_sku: item.sku,
+          p_quantity: qty
+        });
+      }
+    }
+
+    // Mark as refunded
+    const { error: updateError } = await supabase
+      .from('transactions')
+      .update({ status: 'refunded' })
+      .eq('id', id);
+
+    if (updateError) throw updateError;
+
+    res.json({ success: true, message: 'Transaction refunded and stock restored' });
+  } catch (err) {
+    console.error('Refund error:', err);
+    res.status(500).json({ success: false, error: err.message });
   }
 });
 
