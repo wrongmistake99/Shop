@@ -24,11 +24,31 @@ function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
+  // Use the environment variable from Vercel / .env
+  // Fallback to localhost only during local development
+  const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
+
+  useEffect(() => {
+    // Optional: helps you confirm which URL is being used
+    console.log('Dashboard API base URL:', API_BASE);
+  }, []);
+
   useEffect(() => {
     const fetchDashboard = async () => {
       try {
         setLoading(true);
-        const res = await fetch('http://localhost:5000/api/dashboard');
+        setError(null);
+
+        // Use the dynamic base URL
+        const url = `${API_BASE}/api/dashboard`;
+        console.log('Fetching dashboard from:', url); // ← debug log
+
+        const res = await fetch(url);
+
+        if (!res.ok) {
+          throw new Error(`HTTP error! Status: ${res.status} - ${res.statusText}`);
+        }
+
         const result = await res.json();
 
         if (!result.success) {
@@ -38,7 +58,7 @@ function DashboardPage() {
         setDashboardData(result.data);
       } catch (err) {
         console.error('Dashboard fetch error:', err);
-        setError(err.message);
+        setError(err.message || 'Failed to connect to the server. Check your internet or backend status.');
       } finally {
         setLoading(false);
       }
@@ -63,7 +83,7 @@ function DashboardPage() {
       <div className="p-6 min-h-screen bg-gray-50 dark:bg-gray-900 flex items-center justify-center">
         <div className="text-center max-w-md">
           <p className="text-red-600 dark:text-red-400 text-2xl font-bold mb-4">Error</p>
-          <p className="text-gray-700 dark:text-gray-300 mb-6">{error}</p>
+          <p className="text-gray-700 dark:text-gray-300 mb-6 break-words">{error}</p>
           <button
             onClick={() => window.location.reload()}
             className="px-8 py-3 bg-blue-600 hover:bg-blue-700 text-white rounded-lg transition"
