@@ -24,13 +24,13 @@ function DashboardPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  // Use the environment variable from Vercel / .env
-  // Fallback to localhost only during local development
+  // Use Vercel environment variable (REACT_APP_API_URL)
+  // Fallback to localhost only for local development
   const API_BASE = process.env.REACT_APP_API_URL || 'http://localhost:5000';
 
   useEffect(() => {
-    // Optional: helps you confirm which URL is being used
-    console.log('Dashboard API base URL:', API_BASE);
+    // Debug: show which API base is being used
+    console.log('Dashboard → Using API base:', API_BASE);
   }, []);
 
   useEffect(() => {
@@ -39,14 +39,13 @@ function DashboardPage() {
         setLoading(true);
         setError(null);
 
-        // Use the dynamic base URL
         const url = `${API_BASE}/api/dashboard`;
-        console.log('Fetching dashboard from:', url); // ← debug log
+        console.log('Dashboard → Fetching:', url); // ← helps you confirm the URL
 
         const res = await fetch(url);
 
         if (!res.ok) {
-          throw new Error(`HTTP error! Status: ${res.status} - ${res.statusText}`);
+          throw new Error(`HTTP ${res.status} - ${res.statusText}`);
         }
 
         const result = await res.json();
@@ -58,7 +57,7 @@ function DashboardPage() {
         setDashboardData(result.data);
       } catch (err) {
         console.error('Dashboard fetch error:', err);
-        setError(err.message || 'Failed to connect to the server. Check your internet or backend status.');
+        setError(err.message || 'Failed to connect to the server');
       } finally {
         setLoading(false);
       }
@@ -136,7 +135,6 @@ function DashboardPage() {
     year: 'numeric'
   });
 
-  // Generate days 1 to current day of month
   const today = new Date();
   const daysInMonth = today.getDate();
   const dailyLabels = Array.from({ length: daysInMonth }, (_, i) => `${i + 1}`);
@@ -274,7 +272,6 @@ function DashboardPage() {
 
       {/* Tables */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        {/* Top Selling Products - No Revenue Column */}
         <TableCard title="Top Selling Products" subtitle="Ranked by units sold">
           <table className="w-full">
             <thead className="bg-gray-50 dark:bg-gray-800">
@@ -304,7 +301,6 @@ function DashboardPage() {
           </table>
         </TableCard>
 
-        {/* Low Stock Alert */}
         <TableCard title="Low Stock Alert" subtitle="Items that need restocking">
           {d.lowStockItems?.length > 0 ? (
             <table className="w-full">
@@ -337,8 +333,7 @@ function DashboardPage() {
   );
 }
 
-// ── Reusable Components ───────────────────────────────────────────────────────
-
+// Reusable components remain unchanged
 function StatCard({ title, value, subtitle, icon, iconColor = "blue", valueColor = "" }) {
   const colors = {
     green: "bg-green-100 dark:bg-green-900/30 text-green-600 dark:text-green-400",
